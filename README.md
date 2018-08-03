@@ -19,7 +19,7 @@ ITE 游戏智能合约源代码
 ## ITE 游戏相关信息
 
 * 游戏官网: [http://ite.zone](http://ite.zone)
-* 合约账号: **iteblackhole**
+* 合约账号: [iteblackhole](https://eosflare.io/account/iteblackhole)
 * 源代码: [github](https://github.com/itecreator/eos-ite)
 * 交流群:  [discordapp](https://discord.gg/er4JYRP)
 * 邮件:  [itesourcecode@163.com](itesourcecode@163.com)
