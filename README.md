@@ -81,9 +81,14 @@ cleos get table iteblackhole {gameid} bonus
 根据以下数学公式，任何人，可以自主推导出整个游戏当中，任意阶段的数据。这是这个游戏所展现的数学之美：所有数据均由算法决定，不存在任何人为干涉。
 
 ```
-当前智子实时价格: ( quote_balance ) / ( total_alive - total_reserved )
 
-当前智子回收价格:  ( quote_balance ) / ( total_alive - total_reserved ) / 100 * burn_price_ratio
+当前智子实时价格: quote_balance / ( init_max - total_reserved)
+
+实时智子充能价格基本预测（扣除手续费）:  ( eos_amount - ( ( eos_amount + 199) / 200 ) )  / ( quote_balance / ( init_max - total_reserved) ) 
+
+实时智子还原价格基本预测（扣除手续费）:  ( quote_balance / ( init_max - total_reserved) ) *  sell_amount * 0.995
+
+当前智子回收价格:  ( quote_balance ) / ( init_max - total_reserved ) / 100 * burn_price_ratio
 
 建造结局进度:  ( total_reserved ) / ( total_alive / 100 * bad_ending_ratio ) 
 
