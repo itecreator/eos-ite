@@ -244,6 +244,13 @@ public:
 
     auto game_itr = _games.find(gl_itr->gameid);
 
+    auto max = game_itr->quote_balance - game_itr->init_quote_balance;
+
+    if (tokens_out > max)
+    {
+      tokens_out = max;
+    }
+
     _games.modify(game_itr, 0, [&](auto &game) {
       game.counter++;
       game.total_burn += burn;
@@ -296,7 +303,6 @@ public:
     eosio_assert(bytes > 0, "cannot destroy negative byte");
 
     auto gl_itr = _global.begin();
-    auto game_itr = _games.find(gl_itr->gameid);
 
     user_resources_table userres(_self, account);
     auto res_itr = userres.find(gl_itr->gameid);
@@ -304,26 +310,31 @@ public:
     eosio_assert(res_itr != userres.end(), "no resource row");
     eosio_assert(res_itr->hodl >= bytes, "insufficient quota");
 
-    auto init_quote_balance = game_itr->init_quote_balance;
-    auto quote_balance = game_itr->quote_balance;
-    auto total_alive = game_itr->total_alive;
-    auto total_reserved = game_itr->total_reserved;
+    asset tokens_out;
 
-    real_type i = init_quote_balance.amount / 10000;
-    real_type c = quote_balance.amount / 10000;
-    int64_t s = total_alive;
+    auto itr = _market.find(gl_itr->gameid);
 
-    // 销毁价格算法改为实时价格的70%
-    int64_t available = total_alive - total_reserved;
-    real_type T = c / available * 0.7;
-    real_type pay_amount = T * bytes;
+    _market.modify(itr, 0, [&](auto &es) {
+      tokens_out = es.convert(asset(bytes, SATOKO), GAME_SYMBOL);
+    });
 
-    asset payout = asset(pay_amount * 10000, GAME_SYMBOL);
+    asset payout = tokens_out;
+    payout.amount = tokens_out.amount / 100 * burn_price_ratio;
+
     eosio_assert(payout.amount > 0, "must payout a positive amount");
 
     userres.modify(res_itr, account, [&](auto &res) {
       res.hodl -= bytes;
     });
+
+    auto game_itr = _games.find(gl_itr->gameid);
+
+    auto max = game_itr->quote_balance - game_itr->init_quote_balance;
+
+    if (payout > max)
+    {
+      payout = max;
+    }
 
     // change game status
     _games.modify(game_itr, 0, [&](auto &game) {
@@ -389,8 +400,14 @@ public:
 
       // change market status
       auto market_itr = _market.find(gl_itr->gameid);
+
       _market.modify(market_itr, 0, [&](auto &es) {
         int64_t bytes_out = es.convert(reward, SATOKO).amount;
+        if (bytes_out > 0)
+        {
+          asset tokens_out = es.convert(asset(bytes_out, SATOKO), GAME_SYMBOL);
+          asset tokens_out_again = es.convert(asset(bytes_out, SATOKO), GAME_SYMBOL);
+        }
       });
     }
   }
@@ -439,7 +456,12 @@ public:
       eosio_assert(final_balance.amount > 0, "shit happens");
 
       auto claim_price = final_balance;
-      claim_price.amount = claim_price.amount / game_itr->total_reserved;
+
+      if (game_itr->total_reserved > 0)
+      {
+        claim_price.amount = claim_price.amount / game_itr->total_reserved;
+      }
+
       eosio_assert(claim_price.amount > 0, "shit happens again");
 
       // 给操作者发奖
@@ -706,3 +728,29 @@ private:
   typedef eosio::multi_index<N(market), exchange_state> market;
   market _market;
 };
+
+#define EOSIO_ABI_PRO(TYPE, MEMBERS)                                                                                                              \
+  extern "C" {                                                                                                                                    \
+  void apply(uint64_t receiver, uint64_t code, uint64_t action)                                                                                   \
+  {                                                                                                                                               \
+    auto self = receiver;                                                                                                                         \
+    if (action == N(onerror))                                                                                                                     \
+    {                                                                                                                                             \
+      eosio_assert(code == N(eosio), "onerror action's are only valid from the \"eosio\" system account");                                        \
+    }                                                                                                                                             \
+    if ((code == TOKEN_CONTRACT && action == N(transfer)) || (code == self && (action == N(sell) || action == N(destroy) || action == N(claim)))) \
+    {                                                                                                                                             \
+      TYPE thiscontract(self);                                                                                                                    \
+      switch (action)                                                                                                                             \
+      {                                                                                                                                           \
+        EOSIO_API(TYPE, MEMBERS)                                                                                                                  \
+      }                                                                                                                                           \
+    }                                                                                                                                             \
+  }                                                                                                                                               \
+  }
+
+// generate .wasm and .wast file
+EOSIO_ABI_PRO(itegame, (transfer)(sell)(destroy)(claim))
+
+// generate .abi file
+// EOSIO_ABI(itegame, (transfer)(sell)(destroy)(claim))
