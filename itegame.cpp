@@ -31,7 +31,7 @@
 #include <eosiolib/currency.hpp>
 #include <math.h>
 
-#define SATOKO S(4, SATOKO)
+#define SOPHON S(4, SOPHON)
 #define SATOSHI S(4, SATOSHI)
 #define GAME_SYMBOL S(4, EOS)
 #define FEE_ACCOUNT N(itewhitehole)
@@ -46,15 +46,19 @@ using namespace std;
 class itegame : public contract
 {
 public:
-  // 运行参数
+  // parameters
   const uint64_t init_base_balance = 64 * 1024 * 1024ll / 100; // 初始化筹码
   const uint64_t init_quote_balance = 1 * 10000 * 10000ll;     // 初始保证金
-  const uint64_t air_drop_step = 1000;                         // 空投奖励的间隔
-  const uint64_t burn_price_ratio = 70;                        // 销毁价格比例
-  const uint64_t end_prize_times = 100;                        // 终极大奖收益倍数
-  const uint64_t end_prize_ratio = 50;                         // 终极大奖瓜分奖池的比例
+  const uint64_t burn_price_ratio = 90;                        // 销毁价格比例
+  const uint64_t end_prize_times = 10;                         // 终极大奖收益倍数
+  const uint64_t end_prize_ratio = 10;                         // 终极大奖瓜分奖池的比例
   const uint64_t good_ending_ratio = 50;                       // 销毁智子总数 占 总智子数的比例。达到这个比例 游戏结束
-  const uint64_t bad_ending_ratio = 90;                        // 已激活智子总数 占 当前有效智子数（不含已销毁）的比例。达到这个比例 游戏结束
+  const uint64_t bad_ending_ratio = 90;                        // 已激活智子总数 占 当前有效智子数 (不含已销毁) 的比例。达到这个比例 游戏结束
+  const uint64_t air_drop_step = 1000;                         // 空投奖励的间隔
+  const uint64_t action_limit_time = 15;                       // 操作冷却时间(s) 
+  const uint64_t max_operate_amount_ratio = 1;                 // 每次可操作的智子数量, 不大于当前有效智子数 (不含已销毁) 的比例。(防止大户无脑绝杀，游戏变成猝死局)
+  const uint64_t game_start_time = 1533970800000 * 1000;       // 游戏开始时间 2018-08-11 15:00:00
+  const uint64_t max_end_prize = 5000 * 10000;                 // 终极大奖 设定为最大 5000 EOS
 
   itegame(account_name self)
       : contract(self),
@@ -74,6 +78,10 @@ public:
         gl.end_prize_ratio = end_prize_ratio;
         gl.good_ending_ratio = good_ending_ratio;
         gl.bad_ending_ratio = bad_ending_ratio;
+        gl.action_limit_time = action_limit_time;
+        gl.max_operate_amount_ratio = max_operate_amount_ratio;
+        gl.max_end_prize = max_end_prize;
+        gl.game_start_time = game_start_time;
       });
     }
 
@@ -99,7 +107,7 @@ public:
         m.supply.amount = 100000000000000ll;
         m.supply.symbol = SATOSHI;
         m.base.balance.amount = init_base_balance;
-        m.base.balance.symbol = SATOKO;
+        m.base.balance.symbol = SOPHON;
         m.quote.balance.amount = init_quote_balance;
         m.quote.balance.symbol = GAME_SYMBOL;
       });
@@ -112,6 +120,8 @@ public:
     {
       return;
     }
+
+    eosio_assert(current_time() > game_start_time, "The game will start at 2018-08-11 15:00:00");
 
     eosio_assert(quantity.is_valid(), "Invalid token transfer");
     eosio_assert(quantity.amount > 0, "Quantity must be positive");
@@ -133,22 +143,14 @@ public:
     auto market_itr = _market.find(gl_itr->gameid);
 
     auto fee = quant;
-    // fee.amount = (fee.amount + 999) / 1000; /// .1% fee (round up)
     fee.amount = (fee.amount + 199) / 200; /// .5% fee (round up)
-
-    // fee.amount cannot be 0 since that is only possible if quant.amount is 0 which is not allowed by the assert above.
-    // If quant.amount == 1, then fee.amount == 1,
-    // otherwise if quant.amount > 1, then 0 < fee.amount < quant.amount.
+    auto action_total_fee = fee;
 
     auto quant_after_fee = quant;
     quant_after_fee.amount -= fee.amount;
 
-    // quant_after_fee.amount should be > 0 if quant.amount > 1.
-    // If quant.amount == 1, then quant_after_fee.amount == 0 and the next inline transfer will fail causing the buy action to fail.
-
     if (fee.amount > 0)
     {
-
       auto dev_fee = fee;
       dev_fee.amount = fee.amount * 30 / 100;
       fee.amount -= dev_fee.amount;
@@ -172,18 +174,26 @@ public:
     int64_t bytes_out;
 
     _market.modify(market_itr, 0, [&](auto &es) {
-      bytes_out = es.convert(quant_after_fee, SATOKO).amount;
+      bytes_out = es.convert(quant_after_fee, SOPHON).amount;
     });
 
     eosio_assert(bytes_out > 0, "must reserve a positive amount");
 
+    auto game_itr = _games.find(gl_itr->gameid);
+
+    // max operate amount limit
+    auto max_operate_amount = game_itr->total_alive / 100 * max_operate_amount_ratio;
+    eosio_assert(bytes_out < max_operate_amount, "must reserve less than max operate amount");
+
     // burn 1 %
     int64_t burn = bytes_out / 100;
 
-    auto game_itr = _games.find(gl_itr->gameid);
-
     _games.modify(game_itr, 0, [&](auto &game) {
-      game.counter++;
+      // counter limit
+      if (quant_after_fee.amount > 50000)
+      {
+        game.counter++;
+      }
       game.total_burn += burn;
       game.total_alive -= burn;
       game.total_reserved += bytes_out;
@@ -200,12 +210,30 @@ public:
         res.gameid = gl_itr->gameid;
         res.owner = account;
         res.hodl = bytes_out;
+        res.action_count++;
+        res.fee_amount += action_total_fee;
+        res.out += quant;
+      });
+
+      // add new player into players table
+      player_index _players(_self, gl_itr->gameid);
+
+      _players.emplace(_self, [&](auto &new_player) {
+        new_player.player_account = account;
       });
     }
     else
     {
+      // time limit
+      auto time_diff = (current_time() - res_itr->last_action_time) / 1000 / 1000;
+      eosio_assert(time_diff > action_limit_time, "please wait a moment");
+
       userres.modify(res_itr, account, [&](auto &res) {
         res.hodl += bytes_out;
+        res.last_action_time = current_time();
+        res.action_count++;
+        res.fee_amount += action_total_fee;
+        res.out += quant;
       });
     }
     trigger_air_drop(account, quant_after_fee);
@@ -225,24 +253,28 @@ public:
     eosio_assert(res_itr != userres.end(), "no resource row");
     eosio_assert(res_itr->hodl >= bytes, "insufficient quota");
 
+    // time limit
+    auto time_diff = (current_time() - res_itr->last_action_time) / 1000 / 1000;
+    eosio_assert(time_diff > action_limit_time, "please wait a moment");
+
+    auto game_itr = _games.find(gl_itr->gameid);
+
+    // max operate amount limit
+    // auto max_operate_amount = game_itr->total_alive / 100 * max_operate_amount_ratio;
+    // eosio_assert(bytes < max_operate_amount, "must sell less than max operate amount");
+
     asset tokens_out;
 
     auto itr = _market.find(gl_itr->gameid);
 
     _market.modify(itr, 0, [&](auto &es) {
-      tokens_out = es.convert(asset(bytes, SATOKO), GAME_SYMBOL);
+      tokens_out = es.convert(asset(bytes, SOPHON), GAME_SYMBOL);
     });
 
     eosio_assert(tokens_out.amount > 0, "must payout a positive amount");
 
-    userres.modify(res_itr, account, [&](auto &res) {
-      res.hodl -= bytes;
-    });
-
     // burn 1 %
     auto burn = bytes / 100;
-
-    auto game_itr = _games.find(gl_itr->gameid);
 
     auto max = game_itr->quote_balance - game_itr->init_quote_balance;
 
@@ -252,28 +284,39 @@ public:
     }
 
     _games.modify(game_itr, 0, [&](auto &game) {
-      game.counter++;
+      // counter limit
+      if (tokens_out.amount > 50000)
+      {
+        game.counter++;
+      }
       game.total_burn += burn;
       game.total_alive -= burn;
       game.total_reserved -= bytes;
       game.quote_balance -= tokens_out;
     });
 
-    // auto fee = (tokens_out.amount + 999) / 1000; /// .1% fee (round up)
     auto fee = (tokens_out.amount + 199) / 200; /// .5% fee (round up)
+    auto action_total_fee = fee;
 
     auto quant_after_fee = tokens_out;
     quant_after_fee.amount -= fee;
 
+    userres.modify(res_itr, account, [&](auto &res) {
+      res.hodl -= bytes;
+      res.last_action_time = current_time();
+      res.action_count++;
+      res.fee_amount += asset(action_total_fee, GAME_SYMBOL);
+      res.in += tokens_out;
+    });
+
     action(
         permission_level{_self, N(active)},
         TOKEN_CONTRACT, N(transfer),
-        make_tuple(_self, account, quant_after_fee, string("sell")))
+        make_tuple(_self, account, quant_after_fee, string("sell payout")))
         .send();
 
     if (fee > 0)
     {
-
       auto dev_fee = fee;
       dev_fee = fee * 30 / 100;
       fee -= dev_fee;
@@ -310,24 +353,28 @@ public:
     eosio_assert(res_itr != userres.end(), "no resource row");
     eosio_assert(res_itr->hodl >= bytes, "insufficient quota");
 
+    // time limit
+    auto time_diff = (current_time() - res_itr->last_action_time) / 1000 / 1000;
+    eosio_assert(time_diff > action_limit_time, "please wait a moment");
+
+    auto game_itr = _games.find(gl_itr->gameid);
+
+    // max operate amount limit
+    auto max_operate_amount = game_itr->total_alive / 100 * max_operate_amount_ratio;
+    eosio_assert(bytes < max_operate_amount, "must destroy less than max operate amount");
+
     asset tokens_out;
 
     auto itr = _market.find(gl_itr->gameid);
 
     _market.modify(itr, 0, [&](auto &es) {
-      tokens_out = es.convert(asset(bytes, SATOKO), GAME_SYMBOL);
+      tokens_out = es.convert(asset(bytes, SOPHON), GAME_SYMBOL);
     });
 
     asset payout = tokens_out;
     payout.amount = tokens_out.amount / 100 * burn_price_ratio;
 
     eosio_assert(payout.amount > 0, "must payout a positive amount");
-
-    userres.modify(res_itr, account, [&](auto &res) {
-      res.hodl -= bytes;
-    });
-
-    auto game_itr = _games.find(gl_itr->gameid);
 
     auto max = game_itr->quote_balance - game_itr->init_quote_balance;
 
@@ -336,13 +383,27 @@ public:
       payout = max;
     }
 
+    userres.modify(res_itr, account, [&](auto &res) {
+      res.hodl -= bytes;
+      res.last_action_time = current_time();
+      res.action_count++;
+      res.in += payout;
+    });
+
+    asset destroy_balance = tokens_out - payout;
+
     // change game status
     _games.modify(game_itr, 0, [&](auto &game) {
-      game.counter++;
+      // counter limit
+      if (destroy_balance.amount > 50000)
+      {
+        game.counter++;
+      }
       game.total_burn += bytes;
       game.total_alive -= bytes;
       game.total_reserved -= bytes;
       game.quote_balance -= payout;
+      game.destroy_balance += destroy_balance;
     });
 
     // transfer payout to destroyer
@@ -361,54 +422,70 @@ public:
     auto gl_itr = _global.begin();
     const auto game_itr = _games.find(gl_itr->gameid);
 
+    user_resources_table userres(_self, account);
+    auto res_itr = userres.find(gl_itr->gameid);
+
     // check airdrop
     if (game_itr->counter > 0 && game_itr->counter % air_drop_step == 0)
     {
-      // air drop rule  获得10倍于当前操作额度的奖励 但上限是不大于 总奖金池子的 5%
-      auto reward = quant;
-      reward.amount = quant.amount * (end_prize_times / 10);
-
-      eosio_assert(reward.amount > quant.amount, "no, overflow never happen in my code");
+      // air drop rule: return total fee_amount of current user, the real reward <= fee_amount
+      auto reward = res_itr->fee_amount;
 
       auto max = game_itr->quote_balance - game_itr->init_quote_balance;
-      max.amount = max.amount / 100 * (end_prize_ratio / 10); /// 5% bonus (round up)
 
       if (reward > max)
       {
         reward = max;
       }
 
+      userres.modify(res_itr, account, [&](auto &res) {
+        res.in += reward;
+        res.fee_amount = asset(0, GAME_SYMBOL);
+      });
+
+      // change market status
+      auto market_itr = _market.find(gl_itr->gameid);
+
+      // calculate the energy leakage
+      int64_t bytes_out;
+
+      _market.modify(market_itr, 0, [&](auto &es) {
+        bytes_out = es.convert(reward, SOPHON).amount;
+        if (bytes_out > 0)
+        {
+          reward = es.convert(asset(bytes_out, SOPHON), GAME_SYMBOL);
+          reward = es.convert(asset(bytes_out, SOPHON), GAME_SYMBOL);
+        }
+      });
+
+      // change game status
+      _games.modify(game_itr, 0, [&](auto &game) {
+        game.total_burn += bytes_out;
+        game.total_alive -= bytes_out;
+        game.total_reserved -= bytes_out;
+        game.quote_balance -= reward;
+        game.total_lose += bytes_out;
+      });
+
       bonus_index _bonus(_self, gl_itr->gameid);
+
       // create bonus record
       _bonus.emplace(_self, [&](auto &new_bonus) {
         new_bonus.count = game_itr->counter;
         new_bonus.gameid = gl_itr->gameid;
         new_bonus.owner = account;
         new_bonus.reward = reward;
+        new_bonus.lose_amount = bytes_out;
       });
 
-      action(
-          permission_level{_self, N(active)},
-          TOKEN_CONTRACT, N(transfer),
-          make_tuple(_self, account, reward, string("air drop reward")))
-          .send();
-
-      // change game status
-      _games.modify(game_itr, 0, [&](auto &game) {
-        game.quote_balance -= reward;
-      });
-
-      // change market status
-      auto market_itr = _market.find(gl_itr->gameid);
-
-      _market.modify(market_itr, 0, [&](auto &es) {
-        int64_t bytes_out = es.convert(reward, SATOKO).amount;
-        if (bytes_out > 0)
-        {
-          asset tokens_out = es.convert(asset(bytes_out, SATOKO), GAME_SYMBOL);
-          asset tokens_out_again = es.convert(asset(bytes_out, SATOKO), GAME_SYMBOL);
-        }
-      });
+      if (reward.amount > 0)
+      {
+        action(
+            permission_level{_self, N(active)},
+            TOKEN_CONTRACT, N(transfer),
+            make_tuple(_self, account, reward, string("air drop reward")))
+            .send();
+      }
     }
   }
 
@@ -419,8 +496,7 @@ public:
 
     bool gameover = false;
 
-    // 两种结局
-    // 1. 销毁量大于等于 ? %
+    // 1. good ending of the game: total_burn >= {good_ending_ratio} % * init_max
     auto max_burn = game_itr->init_max / 100 * good_ending_ratio;
 
     if (game_itr->total_burn >= max_burn)
@@ -428,7 +504,7 @@ public:
       gameover = true;
     }
 
-    // 2. 占用率大于等于 ? %
+    // 2. bad ending of the game:  total_reserved >= total_alive * {bad_ending_ratio}%
     auto max_reserved = game_itr->total_alive / 100 * bad_ending_ratio;
 
     if (game_itr->total_reserved >= max_reserved)
@@ -438,33 +514,39 @@ public:
 
     if (gameover)
     {
-      // game over  获得100倍于当前操作额度的奖励 但上限是不大于 总奖金池子的 50%
+      // reward = {end_prize_times} * quant , but, <= {end_prize_ratio}% * quote_balance <= max_end_prize
       auto reward = quant;
-      reward.amount = reward.amount * 100;
+      reward.amount = reward.amount * end_prize_times;
 
       auto max = game_itr->quote_balance - game_itr->init_quote_balance;
-      max.amount = max.amount / 100 * end_prize_ratio; /// 50% bonus (round up)
+      max.amount = max.amount / 100 * end_prize_ratio;
 
       if (reward > max)
       {
         reward = max;
       }
 
-      // 游戏状态改为结束, 设定最终claim价格
-      // 计算公式， 总买出 / （总余额-初始保证金-大奖） 。（也就是，要能够刚好把总卖出的买回来）
+      if (reward.amount > max_end_prize)
+      {
+        reward.amount = max_end_prize;
+      }
+
+      // calculate claim price : (quote_balance - init_quote_balance - reward)/ (total_reserved + total_lose)
+      //（make sure the balance of account can buy back all sell）
       auto final_balance = game_itr->quote_balance - game_itr->init_quote_balance - reward;
       eosio_assert(final_balance.amount > 0, "shit happens");
 
       auto claim_price = final_balance;
 
-      if (game_itr->total_reserved > 0)
+      auto total_hold = game_itr->total_reserved + game_itr->total_lose;
+      if (total_hold > 0)
       {
-        claim_price.amount = claim_price.amount / game_itr->total_reserved;
+        claim_price.amount = claim_price.amount / total_hold;
       }
 
       eosio_assert(claim_price.amount > 0, "shit happens again");
 
-      // 给操作者发奖
+      // transfer to hero
       action(
           permission_level{_self, N(active)},
           TOKEN_CONTRACT, N(transfer),
@@ -481,7 +563,7 @@ public:
         game.end_time = current_time();
       });
 
-      // Increment global game counter
+      // increment global game counter
       _global.modify(gl_itr, 0, [&](auto &gl) {
         gl.gameid++;
       });
@@ -500,11 +582,12 @@ public:
 
   void claim(account_name account, int64_t gameid)
   {
+    require_auth(account);
+
     auto gl_itr = _global.begin();
     auto game_itr = _games.find(gameid);
-    // 判断游戏是否存在
+
     eosio_assert(game_itr != _games.end(), "game 404 no found");
-    // 判断游戏是否结局
     eosio_assert(game_itr->status == 1, "no, pls claim after game over");
 
     user_resources_table userres(_self, account);
@@ -542,10 +625,14 @@ private:
     uint64_t end_prize_times;
     uint64_t good_ending_ratio;
     uint64_t bad_ending_ratio;
+    uint64_t action_limit_time;
+    uint64_t max_operate_amount_ratio;
+    uint64_t max_end_prize;
+    uint64_t game_start_time;
 
     uint64_t primary_key() const { return id; }
 
-    EOSLIB_SERIALIZE(global, (id)(gameid)(air_drop_step)(burn_price_ratio)(end_prize_ratio)(end_prize_times)(good_ending_ratio)(bad_ending_ratio))
+    EOSLIB_SERIALIZE(global, (id)(gameid)(air_drop_step)(burn_price_ratio)(end_prize_ratio)(end_prize_times)(good_ending_ratio)(bad_ending_ratio)(action_limit_time)(max_operate_amount_ratio)(max_end_prize)(game_start_time))
   };
 
   typedef eosio::multi_index<N(global), global> global_index;
@@ -561,17 +648,19 @@ private:
     uint64_t total_burn;
     uint64_t total_alive;
     uint64_t total_reserved;
+    uint64_t total_lose;
     uint64_t start_time = current_time();
     uint64_t end_time;
     asset quote_balance = asset(0, GAME_SYMBOL);
     asset init_quote_balance = asset(0, GAME_SYMBOL);
+    asset destroy_balance = asset(0, GAME_SYMBOL);
     asset claim_price = asset(0, GAME_SYMBOL);
     asset hero_reward = asset(0, GAME_SYMBOL);
     account_name hero;
 
     uint64_t primary_key() const { return gameid; }
 
-    EOSLIB_SERIALIZE(game, (gameid)(status)(counter)(init_max)(total_burn)(total_alive)(total_reserved)(start_time)(end_time)(quote_balance)(init_quote_balance)(claim_price)(hero_reward)(hero))
+    EOSLIB_SERIALIZE(game, (gameid)(status)(counter)(init_max)(total_burn)(total_alive)(total_reserved)(total_lose)(start_time)(end_time)(quote_balance)(init_quote_balance)(destroy_balance)(claim_price)(hero_reward)(hero))
   };
 
   typedef eosio::multi_index<N(game), game> game_index;
@@ -584,13 +673,27 @@ private:
     uint64_t gameid;                      // 哪一局
     account_name owner;                   // 获奖者
     asset reward = asset(0, GAME_SYMBOL); // 获奖金额
+    uint64_t lose_amount;                 // 游离智子数
 
     uint64_t primary_key() const { return count; }
 
-    EOSLIB_SERIALIZE(bonus, (count)(gameid)(owner)(reward))
+    EOSLIB_SERIALIZE(bonus, (count)(gameid)(owner)(reward)(lose_amount))
   };
 
   typedef eosio::multi_index<N(bonus), bonus> bonus_index;
+
+  // @abi table player i64
+  struct player
+  {
+    account_name player_account;
+    int64_t join_time = current_time();
+
+    uint64_t primary_key() const { return player_account; }
+
+    EOSLIB_SERIALIZE(player, (player_account)(join_time))
+  };
+
+  typedef eosio::multi_index<N(player), player> player_index;
 
   // @abi table userinfo i64
   struct userinfo
@@ -598,12 +701,17 @@ private:
     uint64_t gameid;
 
     account_name owner;
-    int64_t hodl;
-    int64_t claim_status;
+    int64_t hodl;                              // 持有智子数量
+    int64_t claim_status;                      // 见证奖领取状态
+    int64_t action_count;                      // 累计操作次数
+    int64_t last_action_time = current_time(); // 上一次操作时间
+    asset fee_amount = asset(0, GAME_SYMBOL);  // 累计手续费
+    asset in = asset(0, GAME_SYMBOL);          // 累计收入
+    asset out = asset(0, GAME_SYMBOL);         // 累计支出
 
     uint64_t primary_key() const { return gameid; }
 
-    EOSLIB_SERIALIZE(userinfo, (gameid)(owner)(hodl)(claim_status))
+    EOSLIB_SERIALIZE(userinfo, (gameid)(owner)(hodl)(claim_status)(action_count)(last_action_time)(fee_amount)(in)(out))
   };
 
   typedef eosio::multi_index<N(userinfo), userinfo> user_resources_table;
@@ -749,8 +857,4 @@ private:
   }                                                                                                                                               \
   }
 
-// generate .wasm and .wast file
 EOSIO_ABI_PRO(itegame, (transfer)(sell)(destroy)(claim))
-
-// generate .abi file
-// EOSIO_ABI(itegame, (transfer)(sell)(destroy)(claim))
